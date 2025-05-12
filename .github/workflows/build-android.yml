@@ -1,0 +1,89 @@
+name: Build and Sign Android APK
+
+on:
+  push:
+    branches:
+      - main # Déclenche le workflow à chaque push sur la branche 'main'
+  workflow_dispatch: # Permet de lancer le workflow manuellement depuis l'onglet Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20' # Utilise une version récente de Node.js
+
+    - name: Install dependencies
+      run: npm install # Installe les paquets Node (incluant Capacitor)
+
+    - name: Sync Capacitor project
+      run: npx cap sync android # Synchronise le code web avec le projet Android natif
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17' # Version de Java requise pour Android
+
+    - name: Setup Android SDK
+      uses: r0adkll/setup-android@v2
+      with:
+        android-version: 34
+        force-gradle-wrapper: true
+
+    # --- Signature Steps ---
+    # Cette étape décode votre clé de signature stockée en tant que secret
+    - name: Create Keystore File
+      id: write_key
+      run: |
+        echo "${{ secrets.ANDROID_SIGNING_KEY }}" | base64 --decode > app-release.jks # Décode la clé depuis le secret
+
+    # Construire l'APK en mode release (non signé à ce stade par Gradle)
+    - name: Build Android Release APK
+      run: cd android && ./gradlew assembleRelease
+
+    # Signer l'APK généré en utilisant la clé décodée et les secrets
+    - name: Sign Release APK
+      id: sign_apk
+      run: |
+        # Trouve le chemin de l'APK non signé généré par Gradle
+        # Le nom exact peut varier, donc on le recherche
+        UNSIGNED_APK_PATH=$(find android/app/build/outputs/apk/release/ -name "app-release-unsigned.apk" | head -n 1)
+        # Définit le nom du fichier APK signé de sortie
+        SIGNED_APK_PATH="android/app/build/outputs/apk/release/app-release-signed.apk"
+
+        echo "Chemin APK non signé trouvé : ${UNSIGNED_APK_PATH}" # Ajout pour débug
+
+        # Exécute l'outil apksigner du SDK Android
+        # Utilise les secrets pour les mots de passe et l'alias
+        ${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)/apksigner sign \
+          --ks app-release.jks \
+          --ks-key-alias ${{ secrets.ANDROID_KEY_ALIAS }} \
+          --ks-pass env:KEYSTORE_PASSWORD \
+          --key-pass env:KEY_PASSWORD \
+          --out ${SIGNED_APK_PATH} \
+          ${UNSIGNED_APK_PATH}
+      env: # Passe les mots de passe via des variables d'environnement pour plus de sécurité
+        KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+        KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      working-directory: ./ # Assurez-vous que la commande s'exécute depuis la racine du dépôt
+
+    # Vérifier que l'APK a bien été signé
+    - name: Verify Signed APK
+      run: |
+         # Utilise l'outil apksigner verify
+         ${ANDROID_HOME}/build-tools/$(ls ${ANDROID_HOME}/build-tools/ | sort -V | tail -1)/apksigner verify --verbose android/app/build/outputs/apk/release/app-release-signed.apk
+      working-directory: ./ # Assurez-vous que la commande s'exécute depuis la racine du dépôt
+
+    # Uploader l'APK signé comme un artefact du build (pour pouvoir le télécharger)
+    - name: Upload Signed Release APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-release-apk-signed
+        path: android/app/build/outputs/apk/release/app-release-signed.apk # Chemin vers l'APK signé
